@@ -274,6 +274,8 @@ func NewDefault() Configuration {
 			ProxyReadTimeout:     60,
 			ProxySendTimeout:     60,
 			ProxyBufferSize:      "4k",
+			ProxyCookieDomain:    "off",
+			ProxyCookiePath:      "off",
 			SSLRedirect:          true,
 			CustomHTTPErrors:     []int{},
 			WhitelistSourceRange: []string{},
@@ -297,8 +299,8 @@ type TemplateConfig struct {
 	Backends            []*ingress.Backend
 	PassthroughBackends []*ingress.SSLPassthroughBackend
 	Servers             []*ingress.Server
-	TCPBackends         []*ingress.Location
-	UDPBackends         []*ingress.Location
+	TCPBackends         []ingress.L4Service
+	UDPBackends         []ingress.L4Service
 	HealthzURI          string
 	CustomErrors        bool
 	Cfg                 Configuration

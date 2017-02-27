@@ -134,6 +134,7 @@ type Configuration struct {
 	Backend ingress.Controller
 
 	UpdateStatus bool
+	ElectionID   string
 }
 
 // newIngressController creates an Ingress controller
@@ -295,7 +296,7 @@ func newIngressController(config *Configuration) *GenericController {
 		cache.Indexers{cache.NamespaceIndex: cache.MetaNamespaceIndexFunc})
 
 	ic.nodeLister.Store, ic.nodeController = cache.NewInformer(
-		cache.NewListWatchFromClient(ic.cfg.Client.Core().RESTClient(), "nodes", ic.cfg.Namespace, fields.Everything()),
+		cache.NewListWatchFromClient(ic.cfg.Client.Core().RESTClient(), "nodes", api.NamespaceAll, fields.Everything()),
 		&api.Node{}, ic.cfg.ResyncPeriod, eventHandler)
 
 	if config.UpdateStatus {
@@ -303,6 +304,7 @@ func newIngressController(config *Configuration) *GenericController {
 			Client:         config.Client,
 			PublishService: ic.cfg.PublishService,
 			IngressLister:  ic.ingLister,
+			ElectionID:     config.ElectionID,
 		})
 	} else {
 		glog.Warning("Update of ingress status is disabled (flag --update-status=false was specified)")
@@ -426,30 +428,30 @@ func (ic *GenericController) sync(key interface{}) error {
 	return nil
 }
 
-func (ic *GenericController) getStreamServices(configmapName string, proto api.Protocol) []*ingress.Location {
+func (ic *GenericController) getStreamServices(configmapName string, proto api.Protocol) []ingress.L4Service {
 	glog.V(3).Infof("obtaining information about stream services of type %v located in configmap %v", proto, configmapName)
 	if configmapName == "" {
 		// no configmap configured
-		return []*ingress.Location{}
+		return []ingress.L4Service{}
 	}
 
 	ns, name, err := k8s.ParseNameNS(configmapName)
 	if err != nil {
 		glog.Errorf("unexpected error reading configmap %v: %v", name, err)
-		return []*ingress.Location{}
+		return []ingress.L4Service{}
 	}
 
 	configmap, err := ic.getConfigMap(ns, name)
 	if err != nil {
 		glog.Errorf("unexpected error reading configmap %v: %v", name, err)
-		return []*ingress.Location{}
+		return []ingress.L4Service{}
 	}
 
-	var svcs []*ingress.Location
+	var svcs []ingress.L4Service
 	// k -> port to expose
 	// v -> <namespace>/<service name>:<port from service to be used>
 	for k, v := range configmap.Data {
-		_, err := strconv.Atoi(k)
+		externalPort, err := strconv.Atoi(k)
 		if err != nil {
 			glog.Warningf("%v is not valid as a TCP/UDP port", k)
 			continue
@@ -517,9 +519,15 @@ func (ic *GenericController) getStreamServices(configmapName string, proto api.P
 			continue
 		}
 
-		svcs = append(svcs, &ingress.Location{
-			Path:    k,
-			Backend: fmt.Sprintf("%v-%v-%v", svcNs, svcName, svcPort),
+		svcs = append(svcs, ingress.L4Service{
+			Port: externalPort,
+			Backend: ingress.L4Backend{
+				Name:      svcName,
+				Namespace: svcNs,
+				Port:      intstr.FromString(svcPort),
+				Protocol:  proto,
+			},
+			Endpoints: endps,
 		})
 	}
 
@@ -674,16 +682,23 @@ func (ic *GenericController) getBackendServers() ([]*ingress.Backend, []*ingress
 
 // GetAuthCertificate ...
 func (ic GenericController) GetAuthCertificate(secretName string) (*resolver.AuthSSLCert, error) {
+	key, err := ic.GetSecret(secretName)
+	if err != nil {
+		return &resolver.AuthSSLCert{}, fmt.Errorf("unexpected error: %v", err)
+	}
+	if key != nil {
+		ic.secretQueue.Enqueue(key)
+	}
+
 	bc, exists := ic.sslCertTracker.Get(secretName)
 	if !exists {
 		return &resolver.AuthSSLCert{}, fmt.Errorf("secret %v does not exists", secretName)
 	}
 	cert := bc.(*ingress.SSLCert)
 	return &resolver.AuthSSLCert{
-		Secret:       secretName,
-		CertFileName: cert.PemFileName,
-		CAFileName:   cert.CAFileName,
-		PemSHA:       cert.PemSHA,
+		Secret:     secretName,
+		CAFileName: cert.CAFileName,
+		PemSHA:     cert.PemSHA,
 	}, nil
 }
 
@@ -817,6 +832,8 @@ func (ic *GenericController) createServers(data []interface{},
 		SendTimeout:    bdef.ProxySendTimeout,
 		ReadTimeout:    bdef.ProxyReadTimeout,
 		BufferSize:     bdef.ProxyBufferSize,
+		CookieDomain:   bdef.ProxyCookieDomain,
+		CookiePath:     bdef.ProxyCookiePath,
 	}
 
 	// This adds the Default Certificate to Default Backend and also for vhosts missing the secret
