@@ -21,6 +21,7 @@ import (
 	"os"
 	"path"
 	"strings"
+	"reflect"
 	"testing"
 
 	"io/ioutil"
@@ -28,6 +29,7 @@ import (
 	"k8s.io/ingress/controllers/nginx/pkg/config"
 	"k8s.io/ingress/core/pkg/ingress"
 	"k8s.io/ingress/core/pkg/ingress/annotations/rewrite"
+	"k8s.io/ingress/core/pkg/ingress/annotations/authreq"
 )
 
 var (
@@ -45,12 +47,12 @@ var (
 	rewrite /(.*) /jenkins/$1 break;
 	proxy_pass http://upstream-name;
 	`, false},
-		"redirect /something to /": {"/something", "/", "~* /something", `
+		"redirect /something to /": {"/something", "/", "~* ^/something", `
 	rewrite /something/(.*) /$1 break;
 	rewrite /something / break;
 	proxy_pass http://upstream-name;
 	`, false},
-		"redirect /something-complex to /not-root": {"/something-complex", "/not-root", "~* /something-complex", `
+		"redirect /something-complex to /not-root": {"/something-complex", "/not-root", "~* ^/something-complex", `
 	rewrite /something-complex/(.*) /not-root/$1 break;
 	proxy_pass http://upstream-name;
 	`, false},
@@ -60,14 +62,14 @@ var (
 	subs_filter '<head(.*)>' '<head$1><base href="$scheme://$server_name/jenkins/">' r;
 	subs_filter '<HEAD(.*)>' '<HEAD$1><base href="$scheme://$server_name/jenkins/">' r;
 	`, true},
-		"redirect /something to / and rewrite": {"/something", "/", "~* /something", `
+		"redirect /something to / and rewrite": {"/something", "/", "~* ^/something", `
 	rewrite /something/(.*) /$1 break;
 	rewrite /something / break;
 	proxy_pass http://upstream-name;
 	subs_filter '<head(.*)>' '<head$1><base href="$scheme://$server_name/">' r;
 	subs_filter '<HEAD(.*)>' '<HEAD$1><base href="$scheme://$server_name/">' r;
 	`, true},
-		"redirect /something-complex to /not-root and rewrite": {"/something-complex", "/not-root", "~* /something-complex", `
+		"redirect /something-complex to /not-root and rewrite": {"/something-complex", "/not-root", "~* ^/something-complex", `
 	rewrite /something-complex/(.*) /not-root/$1 break;
 	proxy_pass http://upstream-name;
 	subs_filter '<head(.*)>' '<head$1><base href="$scheme://$server_name/not-root/">' r;
@@ -105,6 +107,23 @@ func TestBuildProxyPass(t *testing.T) {
 	}
 }
 
+func TestBuildAuthResponseHeaders(t *testing.T) {
+	loc := &ingress.Location{
+		ExternalAuth: authreq.External{ResponseHeaders: []string{"h1", "H-With-Caps-And-Dashes"}},
+	}
+	headers := buildAuthResponseHeaders(loc)
+	expected := []string{
+		"auth_request_set $authHeader0 $upstream_http_h1;",
+		"proxy_set_header 'h1' $authHeader0;",
+		"auth_request_set $authHeader1 $upstream_http_h_with_caps_and_dashes;",
+		"proxy_set_header 'H-With-Caps-And-Dashes' $authHeader1;",
+	}
+
+	if !reflect.DeepEqual(expected, headers) {
+		t.Errorf("Expected \n'%v'\nbut returned \n'%v'", expected, headers)
+	}
+}
+
 func TestTemplateWithData(t *testing.T) {
 	pwd, _ := os.Getwd()
 	f, err := os.Open(path.Join(pwd, "../../test/data/config.json"))
@@ -132,7 +151,7 @@ func TestTemplateWithData(t *testing.T) {
 		t.Errorf("invalid NGINX template: %v", err)
 	}
 
-	_, err = ngxTpl.Write(dat, func(b []byte) error { return nil })
+	_, err = ngxTpl.Write(dat)
 	if err != nil {
 		t.Errorf("invalid NGINX template: %v", err)
 	}
@@ -166,6 +185,6 @@ func BenchmarkTemplateWithData(b *testing.B) {
 	}
 
 	for i := 0; i < b.N; i++ {
-		ngxTpl.Write(dat, func(b []byte) error { return nil })
+		ngxTpl.Write(dat)
 	}
 }
